@@ -36,6 +36,17 @@ enum MenuAction {
     Quit,
 }
 
+// Храним MenuItem напрямую — у него есть set_enabled
+struct MenuItems {
+    start_recording: MenuItem,
+    stop_recording: MenuItem,
+    open_settings: MenuItem,
+    open_folder: MenuItem,
+    open_obsidian: MenuItem,
+    quit: MenuItem,
+    menu: Menu,
+}
+
 fn main() {
     env_logger::init();
 
@@ -49,7 +60,6 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    // Create menu items with IDs for tracking
     let menu_items = create_menu_items();
     let tray_icon = create_tray_icon(&menu_items);
 
@@ -67,10 +77,18 @@ fn main() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
 
+    // Клонируем ID для сравнения в event loop
+    let start_id = menu_items.start_recording.id().clone();
+    let stop_id = menu_items.stop_recording.id().clone();
+    let settings_id = menu_items.open_settings.id().clone();
+    let folder_id = menu_items.open_folder.id().clone();
+    let obsidian_id = menu_items.open_obsidian.id().clone();
+    let quit_id = menu_items.quit.id().clone();
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
 
-        // Handle global hotkeys
+        // Горячие клавиши
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state == global_hotkey::HotKeyState::Pressed {
                 let rec = recording.load(Ordering::SeqCst);
@@ -82,30 +100,30 @@ fn main() {
             }
         }
 
-        // Handle tray menu clicks
+        // Клики по меню
         if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             let menu_id = event.id;
 
-            if menu_id == menu_items.start_recording_id {
+            if menu_id == start_id {
                 if !recording.load(Ordering::SeqCst) {
                     tx.send(MenuAction::StartRecording).unwrap();
                 }
-            } else if menu_id == menu_items.stop_recording_id {
+            } else if menu_id == stop_id {
                 if recording.load(Ordering::SeqCst) {
                     tx.send(MenuAction::StopRecording).unwrap();
                 }
-            } else if menu_id == menu_items.open_settings_id {
+            } else if menu_id == settings_id {
                 tx.send(MenuAction::OpenSettings).unwrap();
-            } else if menu_id == menu_items.open_folder_id {
+            } else if menu_id == folder_id {
                 tx.send(MenuAction::OpenFolder).unwrap();
-            } else if menu_id == menu_items.open_obsidian_id {
+            } else if menu_id == obsidian_id {
                 tx.send(MenuAction::OpenObsidian).unwrap();
-            } else if menu_id == menu_items.quit_id {
+            } else if menu_id == quit_id {
                 tx.send(MenuAction::Quit).unwrap();
             }
         }
 
-        // Process actions
+        // Обработка действий
         while let Ok(action) = rx.try_recv() {
             match action {
                 MenuAction::StartRecording => {
@@ -180,17 +198,6 @@ fn main() {
     });
 }
 
-// Menu items with IDs for tracking clicks
-struct MenuItems {
-    start_recording_id: tray_icon::menu::MenuId,
-    stop_recording_id: tray_icon::menu::MenuId,
-    open_settings_id: tray_icon::menu::MenuId,
-    open_folder_id: tray_icon::menu::MenuId,
-    open_obsidian_id: tray_icon::menu::MenuId,
-    quit_id: tray_icon::menu::MenuId,
-    menu: Menu,
-}
-
 fn create_menu_items() -> MenuItems {
     let menu = Menu::new();
 
@@ -200,13 +207,6 @@ fn create_menu_items() -> MenuItems {
     let open_folder = MenuItem::new("📂 Открыть папку", true, None);
     let open_obsidian = MenuItem::new("📖 Открыть Obsidian", true, None);
     let quit = MenuItem::new("❌ Выход", true, None);
-
-    let start_recording_id = start_recording.id().clone();
-    let stop_recording_id = stop_recording.id().clone();
-    let open_settings_id = open_settings.id().clone();
-    let open_folder_id = open_folder.id().clone();
-    let open_obsidian_id = open_obsidian.id().clone();
-    let quit_id = quit.id().clone();
 
     menu.append(&start_recording).unwrap();
     menu.append(&stop_recording).unwrap();
@@ -218,12 +218,12 @@ fn create_menu_items() -> MenuItems {
     menu.append(&quit).unwrap();
 
     MenuItems {
-        start_recording_id,
-        stop_recording_id,
-        open_settings_id,
-        open_folder_id,
-        open_obsidian_id,
-        quit_id,
+        start_recording,
+        stop_recording,
+        open_settings,
+        open_folder,
+        open_obsidian,
+        quit,
         menu,
     }
 }
@@ -251,15 +251,9 @@ fn update_tray_icon(tray_icon: &tray_icon::TrayIcon, state: &Arc<std::sync::Mute
 }
 
 fn update_menu_state(menu_items: &MenuItems, is_recording: bool) {
-    // Enable/disable menu items based on recording state
-    for item in menu_items.menu.items() {
-        let id = item.id();
-        if *id == menu_items.start_recording_id {
-            item.set_enabled(!is_recording);
-        } else if *id == menu_items.stop_recording_id {
-            item.set_enabled(is_recording);
-        }
-    }
+    // MenuItem имеет set_enabled — вызываем напрямую
+    menu_items.start_recording.set_enabled(!is_recording);
+    menu_items.stop_recording.set_enabled(is_recording);
 }
 
 fn load_icon(state: &str) -> tray_icon::Icon {
