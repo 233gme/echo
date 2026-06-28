@@ -1,11 +1,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tao::event_loop::{ControlFlow, EventLoop};
-use tao::menu::{Menu, MenuItem};
-use tao::tray::TrayIconBuilder;
 use tao::window::WindowBuilder;
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use global_hotkey::hotkey::HotKey;
+use tray_icon::{
+    TrayIconBuilder,
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+};
+use global_hotkey::{
+    GlobalHotKeyEvent, GlobalHotKeyManager,
+    hotkey::{HotKey, Modifiers, Code},
+};
 use notify_rust::Notification;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -49,8 +53,8 @@ fn main() {
 
     let hotkey_manager = GlobalHotKeyManager::new().unwrap();
     let hotkey = HotKey::new(
-        Some(global_hotkey::modifiers::CMD | global_hotkey::modifiers::SHIFT),
-        global_hotkey::key::KeyCode::KeyR
+        Some(Modifiers::META | Modifiers::SHIFT),
+        Code::KeyR,
     );
     hotkey_manager.register(hotkey).unwrap();
 
@@ -65,7 +69,7 @@ fn main() {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
 
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.state == HotKeyState::Pressed {
+            if event.state == global_hotkey::HotKeyState::Pressed {
                 let rec = recording.load(Ordering::SeqCst);
                 if rec {
                     tx.send(MenuAction::StopRecording).unwrap();
@@ -137,8 +141,10 @@ fn main() {
         }
 
         match event {
-            tao::event::WindowEvent { event: tao::event::WindowEvent::CloseRequested, .. } => {
-                *control_flow = ControlFlow::Exit;
+            tao::event::Event::WindowEvent { event, .. } => {
+                if let tao::event::WindowEvent::CloseRequested = event {
+                    *control_flow = ControlFlow::Exit;
+                }
             }
             _ => {}
         }
@@ -149,16 +155,16 @@ fn create_tray_icon(event_loop: &EventLoop<()>) -> tray_icon::TrayIcon {
     let icon = load_icon("idle");
 
     let tray_menu = Menu::new();
-    tray_menu.add_item(MenuItem::new("🔴 Начать запись ⌘⇧R", true, None));
-    tray_menu.add_item(MenuItem::new("⏹️ Остановить запись", false, None));
-    tray_menu.add_native_item(tao::menu::MenuType::Separator);
-    tray_menu.add_item(MenuItem::new("📋 Последние встречи", true, None));
-    tray_menu.add_native_item(tao::menu::MenuType::Separator);
-    tray_menu.add_item(MenuItem::new("⚙️ Настройки...", true, None));
-    tray_menu.add_item(MenuItem::new("📂 Открыть папку", true, None));
-    tray_menu.add_item(MenuItem::new("📖 Открыть Obsidian", true, None));
-    tray_menu.add_native_item(tao::menu::MenuType::Separator);
-    tray_menu.add_item(MenuItem::new("❌ Выход", true, None));
+    tray_menu.append(&MenuItem::new("🔴 Начать запись ⌘⇧R", true, None)).unwrap();
+    tray_menu.append(&MenuItem::new("⏹️ Остановить запись", false, None)).unwrap();
+    tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
+    tray_menu.append(&MenuItem::new("📋 Последние встречи", true, None)).unwrap();
+    tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
+    tray_menu.append(&MenuItem::new("⚙️ Настройки...", true, None)).unwrap();
+    tray_menu.append(&MenuItem::new("📂 Открыть папку", true, None)).unwrap();
+    tray_menu.append(&MenuItem::new("📖 Открыть Obsidian", true, None)).unwrap();
+    tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
+    tray_menu.append(&MenuItem::new("❌ Выход", true, None)).unwrap();
 
     TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
@@ -170,13 +176,13 @@ fn create_tray_icon(event_loop: &EventLoop<()>) -> tray_icon::TrayIcon {
 
 fn update_tray_icon(tray_icon: &tray_icon::TrayIcon, state: &Arc<std::sync::Mutex<AppState>>) {
     let (icon, tooltip) = match &*state.lock().unwrap() {
-        AppState::Idle => (load_icon("idle"), "Echo — Ожидание"),
-        AppState::Recording { .. } => (load_icon("recording"), "Echo — ⏺️ Запись..."),
-        AppState::Processing { stage, .. } => (load_icon("processing"), &format!("Echo — {}", stage)),
-        AppState::Error(_) => (load_icon("error"), "Echo — ❌ Ошибка"),
+        AppState::Idle => (load_icon("idle"), "Echo — Ожидание".to_string()),
+        AppState::Recording { .. } => (load_icon("recording"), "Echo — Запись...".to_string()),
+        AppState::Processing { stage, .. } => (load_icon("processing"), format!("Echo — {}", stage)),
+        AppState::Error(_) => (load_icon("error"), "Echo — Ошибка".to_string()),
     };
     tray_icon.set_icon(Some(icon)).unwrap();
-    tray_icon.set_tooltip(Some(tooltip)).unwrap();
+    tray_icon.set_tooltip(Some(&tooltip)).unwrap();
 }
 
 fn load_icon(state: &str) -> tray_icon::Icon {
