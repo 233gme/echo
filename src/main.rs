@@ -44,12 +44,14 @@ fn main() {
 
     let event_loop = EventLoop::new();
 
-    let window = WindowBuilder::new()
+    let _window = WindowBuilder::new()
         .with_visible(false)
         .build(&event_loop)
         .unwrap();
 
-    let tray_icon = create_tray_icon(&event_loop);
+    // Create menu items with IDs for tracking
+    let menu_items = create_menu_items();
+    let tray_icon = create_tray_icon(&menu_items);
 
     let hotkey_manager = GlobalHotKeyManager::new().unwrap();
     let hotkey = HotKey::new(
@@ -68,6 +70,7 @@ fn main() {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
 
+        // Handle global hotkeys
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state == global_hotkey::HotKeyState::Pressed {
                 let rec = recording.load(Ordering::SeqCst);
@@ -79,6 +82,30 @@ fn main() {
             }
         }
 
+        // Handle tray menu clicks
+        if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+            let menu_id = event.id;
+
+            if menu_id == menu_items.start_recording_id {
+                if !recording.load(Ordering::SeqCst) {
+                    tx.send(MenuAction::StartRecording).unwrap();
+                }
+            } else if menu_id == menu_items.stop_recording_id {
+                if recording.load(Ordering::SeqCst) {
+                    tx.send(MenuAction::StopRecording).unwrap();
+                }
+            } else if menu_id == menu_items.open_settings_id {
+                tx.send(MenuAction::OpenSettings).unwrap();
+            } else if menu_id == menu_items.open_folder_id {
+                tx.send(MenuAction::OpenFolder).unwrap();
+            } else if menu_id == menu_items.open_obsidian_id {
+                tx.send(MenuAction::OpenObsidian).unwrap();
+            } else if menu_id == menu_items.quit_id {
+                tx.send(MenuAction::Quit).unwrap();
+            }
+        }
+
+        // Process actions
         while let Ok(action) = rx.try_recv() {
             match action {
                 MenuAction::StartRecording => {
@@ -90,6 +117,7 @@ fn main() {
                             file_path: file_path.clone(),
                         };
                         update_tray_icon(&tray_icon, &state);
+                        update_menu_state(&menu_items, true);
                         show_notification("Echo", "Запись начата — ⌘+⇧+R для остановки");
 
                         rt.spawn(async move {
@@ -112,6 +140,7 @@ fn main() {
                             progress: 0.0,
                         };
                         update_tray_icon(&tray_icon, &state);
+                        update_menu_state(&menu_items, false);
                         show_notification("Echo", "Запись завершена — обработка...");
 
                         let tx_clone = tx.clone();
@@ -151,23 +180,59 @@ fn main() {
     });
 }
 
-fn create_tray_icon(event_loop: &EventLoop<()>) -> tray_icon::TrayIcon {
+// Menu items with IDs for tracking clicks
+struct MenuItems {
+    start_recording_id: tray_icon::menu::MenuId,
+    stop_recording_id: tray_icon::menu::MenuId,
+    open_settings_id: tray_icon::menu::MenuId,
+    open_folder_id: tray_icon::menu::MenuId,
+    open_obsidian_id: tray_icon::menu::MenuId,
+    quit_id: tray_icon::menu::MenuId,
+    menu: Menu,
+}
+
+fn create_menu_items() -> MenuItems {
+    let menu = Menu::new();
+
+    let start_recording = MenuItem::new("🔴 Начать запись ⌘⇧R", true, None);
+    let stop_recording = MenuItem::new("⏹️ Остановить запись", false, None);
+    let open_settings = MenuItem::new("⚙️ Настройки...", true, None);
+    let open_folder = MenuItem::new("📂 Открыть папку", true, None);
+    let open_obsidian = MenuItem::new("📖 Открыть Obsidian", true, None);
+    let quit = MenuItem::new("❌ Выход", true, None);
+
+    let start_recording_id = start_recording.id().clone();
+    let stop_recording_id = stop_recording.id().clone();
+    let open_settings_id = open_settings.id().clone();
+    let open_folder_id = open_folder.id().clone();
+    let open_obsidian_id = open_obsidian.id().clone();
+    let quit_id = quit.id().clone();
+
+    menu.append(&start_recording).unwrap();
+    menu.append(&stop_recording).unwrap();
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
+    menu.append(&open_settings).unwrap();
+    menu.append(&open_folder).unwrap();
+    menu.append(&open_obsidian).unwrap();
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
+    menu.append(&quit).unwrap();
+
+    MenuItems {
+        start_recording_id,
+        stop_recording_id,
+        open_settings_id,
+        open_folder_id,
+        open_obsidian_id,
+        quit_id,
+        menu,
+    }
+}
+
+fn create_tray_icon(menu_items: &MenuItems) -> tray_icon::TrayIcon {
     let icon = load_icon("idle");
 
-    let tray_menu = Menu::new();
-    tray_menu.append(&MenuItem::new("🔴 Начать запись ⌘⇧R", true, None)).unwrap();
-    tray_menu.append(&MenuItem::new("⏹️ Остановить запись", false, None)).unwrap();
-    tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
-    tray_menu.append(&MenuItem::new("📋 Последние встречи", true, None)).unwrap();
-    tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
-    tray_menu.append(&MenuItem::new("⚙️ Настройки...", true, None)).unwrap();
-    tray_menu.append(&MenuItem::new("📂 Открыть папку", true, None)).unwrap();
-    tray_menu.append(&MenuItem::new("📖 Открыть Obsidian", true, None)).unwrap();
-    tray_menu.append(&PredefinedMenuItem::separator()).unwrap();
-    tray_menu.append(&MenuItem::new("❌ Выход", true, None)).unwrap();
-
     TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
+        .with_menu(Box::new(menu_items.menu.clone()))
         .with_tooltip("Echo — Meeting Assistant")
         .with_icon(icon)
         .build()
@@ -183,6 +248,18 @@ fn update_tray_icon(tray_icon: &tray_icon::TrayIcon, state: &Arc<std::sync::Mute
     };
     tray_icon.set_icon(Some(icon)).unwrap();
     tray_icon.set_tooltip(Some(&tooltip)).unwrap();
+}
+
+fn update_menu_state(menu_items: &MenuItems, is_recording: bool) {
+    // Enable/disable menu items based on recording state
+    for item in menu_items.menu.items() {
+        let id = item.id();
+        if *id == menu_items.start_recording_id {
+            item.set_enabled(!is_recording);
+        } else if *id == menu_items.stop_recording_id {
+            item.set_enabled(is_recording);
+        }
+    }
 }
 
 fn load_icon(state: &str) -> tray_icon::Icon {
