@@ -1,4 +1,46 @@
-/target/
+# Rust
+/target
+**/*.rs.bk
 Cargo.lock
-*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/venv/
+backend/venv
+backend/env/
+backend/.env
+*.egg-info/
+dist/
+build/
+
+# Models (большие файлы)
+backend/models/*.bin
+backend/models/*.safetensors
+backend/models/*.pt
+backend/models/*.pth
+backend/models/*.onnx
+backend/models/*.gguf
+
+# Data
+*.m4a
+*.wav
+*.mp3
+*.sqlite
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Logs
+*.log

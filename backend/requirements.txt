@@ -1,0 +1,31 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+pydantic==2.7.0
+pydantic-settings==2.2.0
+sqlalchemy==2.0.30
+aiosqlite==0.20.0
+
+# ML
+numpy==1.26.4
+librosa==0.10.2
+soundfile==0.12.1
+
+# Whisper MLX (macOS Apple Silicon)
+mlx-whisper
+
+# VAD
+silero-vad
+onnxruntime-silicon
+
+# Diarization
+pyannote.audio==3.1.0
+speechbrain==0.5.16
+
+# LLM
+mlx-lm
+
+# Utils
+jinja2==3.1.4
+python-dateutil==2.9.0
+watchdog==4.0.0
