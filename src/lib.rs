@@ -1,46 +1,22 @@
-pub mod config;
 pub mod audio;
 pub mod capture;
+pub mod config;
 
-pub use config::{Config, AudioConfig, CaptureConfig, get_config_path, load_config, save_config};
-pub use audio::AudioRecorder;
-pub use capture::ScreenCapture;
+use serde::{Deserialize, Serialize};
 
-/// Основной API приложения
-pub struct EchoApp {
-    config: Config,
-    audio_recorder: AudioRecorder,
-    screen_capture: ScreenCapture,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingInfo {
+    pub id: String,
+    pub date: String,
+    pub duration: String,
+    pub speakers: Vec<String>,
+    pub status: MeetingStatus,
 }
 
-impl EchoApp {
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            audio_recorder: AudioRecorder::new(config.audio.enabled),
-            screen_capture: ScreenCapture::new(config.capture.enabled),
-        }
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
-    pub fn start_capture(&self) -> anyhow::Result<()> {
-        self.audio_recorder.start()?;
-        self.screen_capture.start()?;
-        Ok(())
-    }
-
-    pub fn stop_capture(&self) -> anyhow::Result<()> {
-        self.audio_recorder.stop()?;
-        self.screen_capture.stop()?;
-        Ok(())
-    }
-}
-
-impl Default for EchoApp {
-    fn default() -> Self {
-        Self::new(Config::default())
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MeetingStatus {
+    Recording,
+    Processing { stage: String, progress: f32 },
+    Completed,
+    Error(String),
 }

@@ -1,63 +1,77 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Config {
-    pub audio: AudioConfig,
-    pub capture: CaptureConfig,
+pub struct AppConfig {
+    pub recordings_dir: PathBuf,
+    pub temp_dir: PathBuf,
+    pub cache_dir: PathBuf,
+    pub logs_dir: PathBuf,
+    pub obsidian_vault: PathBuf,
+    pub config_path: PathBuf,
+    pub voice_reference: PathBuf,
+    pub db_path: PathBuf,
+    pub backend_url: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AudioConfig {
-    pub enabled: bool,
-    pub sample_rate: u32,
-    pub channels: u16,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct CaptureConfig {
-    pub enabled: bool,
-    pub quality: u32,
-    pub output_dir: PathBuf,
-}
-
-impl Default for Config {
+impl Default for AppConfig {
     fn default() -> Self {
+        let base = dirs::home_dir().unwrap().join(".meeting_assistant");
+
         Self {
-            audio: AudioConfig {
-                enabled: true,
-                sample_rate: 44100,
-                channels: 2,
-            },
-            capture: CaptureConfig {
-                enabled: true,
-                quality: 90,
-                output_dir: dirs::audio_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("echo"),
-            },
+            recordings_dir: base.join("recordings"),
+            temp_dir: base.join("temp"),
+            cache_dir: base.join("cache"),
+            logs_dir: base.join("logs"),
+            obsidian_vault: dirs::home_dir().unwrap().join("Obsidian").join("Meetings"),
+            config_path: base.join("config.yaml"),
+            voice_reference: base.join("voice_reference.wav"),
+            db_path: base.join("db.sqlite"),
+            backend_url: "http://127.0.0.1:8000".to_string(),
         }
     }
 }
 
-pub fn get_config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("echo")
-        .join("config.yaml")
-}
+impl AppConfig {
+    pub fn load() -> Self {
+        let config_path = dirs::home_dir()
+            .unwrap()
+            .join(".meeting_assistant")
+            .join("config.yaml");
 
-pub fn load_config() -> Result<Config> {
-    let config_path = get_config_path();
-    let content = std::fs::read_to_string(&config_path)?;
-    let config: Config = serde_yaml::from_str(&content)?;
-    Ok(config)
-}
+        if config_path.exists() {
+            let content = std::fs::read_to_string(&config_path).unwrap();
+            serde_yaml::from_str(&content).unwrap_or_default()
+        } else {
+            let config = Self::default();
+            config.save();
+            config
+        }
+    }
 
-pub fn save_config(config: &Config) -> Result<()> {
-    let config_path = get_config_path();
-    std::fs::create_dir_all(config_path.parent().unwrap())?;
-    let content = serde_yaml::to_string(config)?;
-    std::fs::write(config_path, content)?;
-    Ok(())
+    pub fn save(&self) {
+        let content = serde_yaml::to_string(self).unwrap();
+        std::fs::create_dir_all(self.config_path.parent().unwrap()).unwrap();
+        std::fs::write(&self.config_path, content).unwrap();
+    }
+
+    pub fn ensure_dirs(&self) {
+        for dir in [
+            &self.recordings_dir,
+            &self.temp_dir,
+            &self.cache_dir,
+            &self.logs_dir,
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+    }
+
+    pub fn get_recording_path(&self) -> String {
+        let now = chrono::Local::now();
+        let filename = format!("meeting_{}.m4a", now.format("%Y-%m-%d_%H%M%S"));
+        self.recordings_dir
+            .join(filename)
+            .to_string_lossy()
+            .to_string()
+    }
 }

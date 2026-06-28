@@ -1,32 +1,18 @@
-use anyhow::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Заглушка для аудио записи
-pub struct AudioRecorder {
-    enabled: bool,
+static RECORDING: AtomicBool = AtomicBool::new(false);
+
+pub async fn start_recording(file_path: String) {
+    RECORDING.store(true, Ordering::SeqCst);
+    log::info!("Starting recording to: {}", file_path);
+    // TODO: Implement ScreenCaptureKit audio capture
 }
 
-impl AudioRecorder {
-    pub fn new(enabled: bool) -> Self {
-        Self { enabled }
-    }
-
-    pub fn start(&self) -> Result<()> {
-        if self.enabled {
-            println!("Audio recording started");
-        }
-        Ok(())
-    }
-
-    pub fn stop(&self) -> Result<()> {
-        if self.enabled {
-            println!("Audio recording stopped");
-        }
-        Ok(())
-    }
+pub fn stop_recording() {
+    RECORDING.store(false, Ordering::SeqCst);
+    log::info!("Recording stopped");
 }
 
-impl Default for AudioRecorder {
-    fn default() -> Self {
-        Self::new(true)
-    }
+pub fn is_recording() -> bool {
+    RECORDING.load(Ordering::SeqCst)
 }

@@ -1,38 +1,261 @@
-use anyhow::Result;
 use std::sync::Arc;
-use tray_icon::{Menu, MenuItem, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use hotkey::{GlobalHotKeyManager, hotkey::{HotKey, Modifiers, KeyCode}};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tao::event_loop::{ControlFlow, EventLoop};
+use tao::menu::{Menu, MenuItem};
+use tao::tray::TrayIconBuilder;
+use tao::window::WindowBuilder;
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use global_hotkey::hotkey::HotKey;
+use notify_rust::Notification;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
-mod config;
-mod audio;
-mod capture;
+use echo::config::AppConfig;
 
-fn main() -> Result<()> {
-    // Инициализация горячих клавиш
-    let hotkey_manager = GlobalHotKeyManager::new()?;
-    let hotkey = HotKey::new(Modifiers::SHIFT | Modifiers::SUPER, KeyCode::KeyE)?;
-    hotkey_manager.register(hotkey)?;
+#[derive(Debug, Clone)]
+enum AppState {
+    Idle,
+    Recording { start_time: Instant, file_path: String },
+    Processing { stage: String, progress: f32 },
+    Error(String),
+}
 
-    // Создание системного трея
-    let menu = Menu::new();
-    let quit_item = MenuItem::new("Quit", true, None);
-    menu.append(&quit_item)?;
+#[derive(Debug, Clone)]
+enum MenuAction {
+    StartRecording,
+    StopRecording,
+    ProcessingDone,
+    ProcessingError(String),
+    OpenSettings,
+    OpenFolder,
+    OpenObsidian,
+    Quit,
+}
 
-    let tray_icon = TrayIconBuilder::new()
-        .with_menu(menu)
-        .with_tooltip("Echo")
-        .build()?;
+fn main() {
+    env_logger::init();
 
-    tray_icon.add_event_listener(|event| {
-        if let TrayIconEvent::Click { .. } = event {
-            println!("Tray icon clicked");
+    let config = AppConfig::load();
+    config.ensure_dirs();
+
+    let event_loop = EventLoop::new();
+
+    let window = WindowBuilder::new()
+        .with_visible(false)
+        .build(&event_loop)
+        .unwrap();
+
+    let tray_icon = create_tray_icon(&event_loop);
+
+    let hotkey_manager = GlobalHotKeyManager::new().unwrap();
+    let hotkey = HotKey::new(
+        Some(global_hotkey::modifiers::CMD | global_hotkey::modifiers::SHIFT),
+        global_hotkey::key::KeyCode::KeyR
+    );
+    hotkey_manager.register(hotkey).unwrap();
+
+    let state = Arc::new(std::sync::Mutex::new(AppState::Idle));
+    let recording = Arc::new(AtomicBool::new(false));
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<MenuAction>();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
+
+        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if event.state == HotKeyState::Pressed {
+                let rec = recording.load(Ordering::SeqCst);
+                if rec {
+                    tx.send(MenuAction::StopRecording).unwrap();
+                } else {
+                    tx.send(MenuAction::StartRecording).unwrap();
+                }
+            }
+        }
+
+        while let Ok(action) = rx.try_recv() {
+            match action {
+                MenuAction::StartRecording => {
+                    if !recording.load(Ordering::SeqCst) {
+                        recording.store(true, Ordering::SeqCst);
+                        let file_path = config.get_recording_path();
+                        *state.lock().unwrap() = AppState::Recording {
+                            start_time: Instant::now(),
+                            file_path: file_path.clone(),
+                        };
+                        update_tray_icon(&tray_icon, &state);
+                        show_notification("Echo", "Запись начата — ⌘+⇧+R для остановки");
+
+                        rt.spawn(async move {
+                            echo::audio::start_recording(file_path).await;
+                        });
+                    }
+                }
+                MenuAction::StopRecording => {
+                    if recording.load(Ordering::SeqCst) {
+                        recording.store(false, Ordering::SeqCst);
+                        echo::audio::stop_recording();
+
+                        let file_path = match &*state.lock().unwrap() {
+                            AppState::Recording { file_path, .. } => file_path.clone(),
+                            _ => config.get_recording_path(),
+                        };
+
+                        *state.lock().unwrap() = AppState::Processing {
+                            stage: "Транскрибация".to_string(),
+                            progress: 0.0,
+                        };
+                        update_tray_icon(&tray_icon, &state);
+                        show_notification("Echo", "Запись завершена — обработка...");
+
+                        let tx_clone = tx.clone();
+                        rt.spawn(async move {
+                            match send_to_backend(file_path).await {
+                                Ok(_) => tx_clone.send(MenuAction::ProcessingDone).unwrap(),
+                                Err(e) => tx_clone.send(MenuAction::ProcessingError(e.to_string())).unwrap(),
+                            }
+                        });
+                    }
+                }
+                MenuAction::ProcessingDone => {
+                    *state.lock().unwrap() = AppState::Idle;
+                    update_tray_icon(&tray_icon, &state);
+                    show_notification("Echo", "✅ Готово — проверь Obsidian");
+                }
+                MenuAction::ProcessingError(err) => {
+                    *state.lock().unwrap() = AppState::Error(err.clone());
+                    update_tray_icon(&tray_icon, &state);
+                    show_notification("Echo", &format!("❌ Ошибка: {}", err));
+                }
+                MenuAction::OpenSettings => open_settings(&config),
+                MenuAction::OpenFolder => open_folder(&config.recordings_dir),
+                MenuAction::OpenObsidian => open_obsidian(&config),
+                MenuAction::Quit => *control_flow = ControlFlow::Exit,
+            }
+        }
+
+        match event {
+            tao::event::WindowEvent { event: tao::event::WindowEvent::CloseRequested, .. } => {
+                *control_flow = ControlFlow::Exit;
+            }
+            _ => {}
         }
     });
+}
 
-    println!("Echo started! Press Shift+Super+E to trigger capture");
+fn create_tray_icon(event_loop: &EventLoop<()>) -> tray_icon::TrayIcon {
+    let icon = load_icon("idle");
 
-    // Основной цикл приложения
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    let tray_menu = Menu::new();
+    tray_menu.add_item(MenuItem::new("🔴 Начать запись ⌘⇧R", true, None));
+    tray_menu.add_item(MenuItem::new("⏹️ Остановить запись", false, None));
+    tray_menu.add_native_item(tao::menu::MenuType::Separator);
+    tray_menu.add_item(MenuItem::new("📋 Последние встречи", true, None));
+    tray_menu.add_native_item(tao::menu::MenuType::Separator);
+    tray_menu.add_item(MenuItem::new("⚙️ Настройки...", true, None));
+    tray_menu.add_item(MenuItem::new("📂 Открыть папку", true, None));
+    tray_menu.add_item(MenuItem::new("📖 Открыть Obsidian", true, None));
+    tray_menu.add_native_item(tao::menu::MenuType::Separator);
+    tray_menu.add_item(MenuItem::new("❌ Выход", true, None));
+
+    TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Echo — Meeting Assistant")
+        .with_icon(icon)
+        .build()
+        .unwrap()
+}
+
+fn update_tray_icon(tray_icon: &tray_icon::TrayIcon, state: &Arc<std::sync::Mutex<AppState>>) {
+    let (icon, tooltip) = match &*state.lock().unwrap() {
+        AppState::Idle => (load_icon("idle"), "Echo — Ожидание"),
+        AppState::Recording { .. } => (load_icon("recording"), "Echo — ⏺️ Запись..."),
+        AppState::Processing { stage, .. } => (load_icon("processing"), &format!("Echo — {}", stage)),
+        AppState::Error(_) => (load_icon("error"), "Echo — ❌ Ошибка"),
+    };
+    tray_icon.set_icon(Some(icon)).unwrap();
+    tray_icon.set_tooltip(Some(tooltip)).unwrap();
+}
+
+fn load_icon(state: &str) -> tray_icon::Icon {
+    let (r, g, b) = match state {
+        "idle" => (76, 175, 80),
+        "recording" => (244, 67, 54),
+        "processing" => (33, 150, 243),
+        "error" => (244, 67, 54),
+        _ => (128, 128, 128),
+    };
+
+    let size = 32;
+    let mut rgba = Vec::with_capacity(size * size * 4);
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - size as f32 / 2.0;
+            let dy = y as f32 - size as f32 / 2.0;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let radius = size as f32 / 2.0 - 2.0;
+
+            if dist < radius {
+                rgba.push(r);
+                rgba.push(g);
+                rgba.push(b);
+                rgba.push(255);
+            } else {
+                rgba.push(0);
+                rgba.push(0);
+                rgba.push(0);
+                rgba.push(0);
+            }
+        }
+    }
+
+    tray_icon::Icon::from_rgba(rgba, size as u32, size as u32).unwrap()
+}
+
+fn show_notification(title: &str, body: &str) {
+    Notification::new()
+        .summary(title)
+        .body(body)
+        .timeout(Duration::from_secs(5))
+        .show()
+        .unwrap();
+}
+
+fn open_settings(config: &AppConfig) {
+    std::process::Command::new("open")
+        .arg(&config.config_path)
+        .spawn()
+        .unwrap();
+}
+
+fn open_folder(path: &std::path::Path) {
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .unwrap();
+}
+
+fn open_obsidian(config: &AppConfig) {
+    let vault_path = &config.obsidian_vault;
+    std::process::Command::new("open")
+        .arg(format!("obsidian://open?vault={}", vault_path.display()))
+        .spawn()
+        .unwrap();
+}
+
+async fn send_to_backend(file_path: String) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post("http://127.0.0.1:8000/api/process")
+        .json(&serde_json::json!({"file_path": file_path}))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("Backend error: {}", response.status()).into())
     }
 }
