@@ -23,6 +23,7 @@ env_logger = "0.11"
 global-hotkey = "0.6"
 notify-rust = "4"
 dirs = "5"
+screencapturekit = { version = "8", features = ["macos_13_0"] }
 
 [profile.release]
 opt-level = 3
