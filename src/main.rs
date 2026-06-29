@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
 use tray_icon::{
@@ -20,7 +21,10 @@ use echo::config::AppConfig;
 enum AppState {
     Idle,
     Recording { start_time: Instant, file_path: String },
-    Processing { stage: String, progress: f32 },
+    /// Recording stopped; waiting for the worker to finalize the audio file
+    /// (stop_capture + WAV→M4A conversion) before it can be sent to backend.
+    Finalizing,
+    Processing { stage: String },
     Error(String),
 }
 
@@ -70,8 +74,7 @@ fn main() {
     );
     hotkey_manager.register(hotkey).unwrap();
 
-    let state = Arc::new(std::sync::Mutex::new(AppState::Idle));
-    let recording = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(Mutex::new(AppState::Idle));
 
     let (tx, mut rx) = mpsc::unbounded_channel::<MenuAction>();
 
@@ -91,8 +94,7 @@ fn main() {
         // Горячие клавиши
         if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state == global_hotkey::HotKeyState::Pressed {
-                let rec = recording.load(Ordering::SeqCst);
-                if rec {
+                if echo::audio::is_recording() {
                     tx.send(MenuAction::StopRecording).unwrap();
                 } else {
                     tx.send(MenuAction::StartRecording).unwrap();
@@ -105,11 +107,11 @@ fn main() {
             let menu_id = event.id;
 
             if menu_id == start_id {
-                if !recording.load(Ordering::SeqCst) {
+                if !echo::audio::is_recording() && !matches!(*state.lock().unwrap(), AppState::Finalizing | AppState::Processing { .. }) {
                     tx.send(MenuAction::StartRecording).unwrap();
                 }
             } else if menu_id == stop_id {
-                if recording.load(Ordering::SeqCst) {
+                if echo::audio::is_recording() {
                     tx.send(MenuAction::StopRecording).unwrap();
                 }
             } else if menu_id == settings_id {
@@ -123,12 +125,36 @@ fn main() {
             }
         }
 
+        // Пока идёт финализация записи, опрашиваем результат worker'а на
+        // каждом тике цикла. Только когда файл готов — отправляем в backend.
+        if matches!(*state.lock().unwrap(), AppState::Finalizing) {
+            if let Some(result) = echo::audio::try_take_completion() {
+                match result {
+                    Ok(file_path) => {
+                        let tx_clone = tx.clone();
+                        rt.spawn(async move {
+                            match send_to_backend(file_path).await {
+                                Ok(_) => tx_clone.send(MenuAction::ProcessingDone).unwrap(),
+                                Err(e) => {
+                                    tx_clone.send(MenuAction::ProcessingError(e.to_string())).unwrap()
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tx.send(MenuAction::ProcessingError(e)).unwrap();
+                    }
+                }
+            }
+        }
+
         // Обработка действий
         while let Ok(action) = rx.try_recv() {
             match action {
                 MenuAction::StartRecording => {
-                    if !recording.load(Ordering::SeqCst) {
-                        recording.store(true, Ordering::SeqCst);
+                    if !echo::audio::is_recording()
+                        && !matches!(*state.lock().unwrap(), AppState::Finalizing | AppState::Processing { .. })
+                    {
                         let file_path = config.get_recording_path();
                         *state.lock().unwrap() = AppState::Recording {
                             start_time: Instant::now(),
@@ -144,30 +170,16 @@ fn main() {
                     }
                 }
                 MenuAction::StopRecording => {
-                    if recording.load(Ordering::SeqCst) {
-                        recording.store(false, Ordering::SeqCst);
+                    if echo::audio::is_recording() {
                         echo::audio::stop_recording();
 
-                        let file_path = match &*state.lock().unwrap() {
-                            AppState::Recording { file_path, .. } => file_path.clone(),
-                            _ => config.get_recording_path(),
-                        };
-
-                        *state.lock().unwrap() = AppState::Processing {
-                            stage: "Транскрибация".to_string(),
-                            progress: 0.0,
-                        };
+                        // Worker continues asynchronously: stop_capture +
+                        // WAV→M4A. We poll for completion in the event loop
+                        // above and only then send the file to the backend.
+                        *state.lock().unwrap() = AppState::Finalizing;
                         update_tray_icon(&tray_icon, &state);
                         update_menu_state(&menu_items, false);
                         show_notification("Echo", "Запись завершена — обработка...");
-
-                        let tx_clone = tx.clone();
-                        rt.spawn(async move {
-                            match send_to_backend(file_path).await {
-                                Ok(_) => tx_clone.send(MenuAction::ProcessingDone).unwrap(),
-                                Err(e) => tx_clone.send(MenuAction::ProcessingError(e.to_string())).unwrap(),
-                            }
-                        });
                     }
                 }
                 MenuAction::ProcessingDone => {
@@ -239,11 +251,12 @@ fn create_tray_icon(menu_items: &MenuItems) -> tray_icon::TrayIcon {
         .unwrap()
 }
 
-fn update_tray_icon(tray_icon: &tray_icon::TrayIcon, state: &Arc<std::sync::Mutex<AppState>>) {
+fn update_tray_icon(tray_icon: &tray_icon::TrayIcon, state: &Arc<Mutex<AppState>>) {
     let (icon, tooltip) = match &*state.lock().unwrap() {
         AppState::Idle => (load_icon("idle"), "Echo — Ожидание".to_string()),
         AppState::Recording { .. } => (load_icon("recording"), "Echo — Запись...".to_string()),
-        AppState::Processing { stage, .. } => (load_icon("processing"), format!("Echo — {}", stage)),
+        AppState::Finalizing => (load_icon("processing"), "Echo — Сохранение...".to_string()),
+        AppState::Processing { stage } => (load_icon("processing"), format!("Echo — {}", stage)),
         AppState::Error(_) => (load_icon("error"), "Echo — Ошибка".to_string()),
     };
     tray_icon.set_icon(Some(icon)).unwrap();
