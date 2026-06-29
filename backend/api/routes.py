@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -18,7 +19,7 @@ class ProcessRequest(BaseModel):
 
 class ProcessResponse(BaseModel):
     status: str
-    meeting_id: str | None = None
+    meeting_id: Optional[str] = None
     message: str
 
 
