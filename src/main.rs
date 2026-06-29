@@ -133,7 +133,7 @@ fn main() {
                     Ok(file_path) => {
                         let tx_clone = tx.clone();
                         rt.spawn(async move {
-                            match send_to_backend(file_path).await {
+                            match send_to_backend(file_path.display().to_string()).await {
                                 Ok(_) => tx_clone.send(MenuAction::ProcessingDone).unwrap(),
                                 Err(e) => {
                                     tx_clone.send(MenuAction::ProcessingError(e.to_string())).unwrap()

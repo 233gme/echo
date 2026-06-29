@@ -144,9 +144,8 @@ fn inner_run_capture(
 
     let path = Path::new(file_path);
     let wav_path = path.with_extension("wav");
-    let wav_writer = std::sync::Arc::new(std::sync::Mutex::new(WavWriter::new(
-        &wav_path, 48000, 2,
-    )?));
+    let wav_writer =
+        std::sync::Arc::new(std::sync::Mutex::new(WavWriter::new(&wav_path, 48000, 2)?));
     let wav_writer_handler = wav_writer.clone();
 
     // SCStream is owned by this worker thread for the entire capture. It must
@@ -215,8 +214,24 @@ fn inner_run_capture(
     // can unwrap our clone and finalize. Fall back to locking if, for any
     // reason, an extra reference lingers.
     match std::sync::Arc::try_unwrap(wav_writer) {
-        Ok(writer) => writer.into_inner()?.finalize()?,
-        Err(arc) => arc.lock()?.finalize()?,
+        Ok(writer) => {
+            let result = writer
+                .into_inner()
+                .map_err(|poison| format!("PoisonError: {:?}", poison.into_inner()))
+                
+                .map_err(|e| format!("IOError: {:?}", e));
+            if let Err(e) = result {
+                log::warn!("Failed to finalize WAV (owned): {}", e);
+            }
+        }
+        Err(arc) => {
+            let result = arc.lock().map_err(|e| format!("PoisonError: {:?}", e));
+            if let Ok(mut writer) = result {
+                if let Err(e) = writer.finalize() {
+                    log::warn!("Failed to finalize WAV (locked): {:?}", e);
+                }
+            }
+        }
     }
     log::info!("WAV saved: {}", wav_path.display());
 
@@ -240,15 +255,13 @@ fn inner_run_capture(
         log::info!("M4A saved: {}", m4a_path.display());
         Ok(m4a_path)
     } else {
-        log::warn!(
-            "afconvert failed, keeping WAV: {}",
-            wav_path.display()
-        );
+        log::warn!("afconvert failed, keeping WAV: {}", wav_path.display());
         Ok(wav_path)
     }
 }
 
 /// Streaming WAV writer (float32, little-endian).
+#[derive(Debug)]
 struct WavWriter {
     file: File,
     data_size: u64,
@@ -271,10 +284,7 @@ impl WavWriter {
         file.write_all(&32u16.to_le_bytes())?;
         file.write_all(b"data")?;
         file.write_all(&0u32.to_le_bytes())?;
-        Ok(WavWriter {
-            file,
-            data_size: 0,
-        })
+        Ok(WavWriter { file, data_size: 0 })
     }
 
     fn write_raw(&mut self, data: &[u8]) {
@@ -291,7 +301,8 @@ impl WavWriter {
         let file_size = (self.data_size + 36) as u32;
         self.file.write_all(&file_size.to_le_bytes())?;
         self.file.seek(SeekFrom::Start(40))?;
-        self.file.write_all(&(self.data_size as u32).to_le_bytes())?;
+        self.file
+            .write_all(&(self.data_size as u32).to_le_bytes())?;
         self.file.flush()?;
         Ok(())
     }
